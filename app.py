@@ -8,13 +8,17 @@ from pathlib import Path
 import logging
 import traceback
 from datetime import date
+import importlib
+import typing
 
-# SQLite default DB file (can override with DATABASE_FILE env var)
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+
+# Local SQLite defaults (used when DATABASE_URL is not set)
 DB_FILE = os.getenv("DATABASE_FILE", "fintrack.db")
 DB_PATH = Path(DB_FILE)
 
 
-def init_db():
+def _sqlite_init_db():
     try:
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(DB_PATH)
@@ -43,10 +47,10 @@ def init_db():
         conn.commit()
         conn.close()
     except Exception:
-        logging.exception("Failed to initialize the database")
+        logging.exception("Failed to initialize the SQLite database")
 
 
-def load_data():
+def _sqlite_load_data():
     try:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
@@ -68,7 +72,7 @@ def load_data():
         st.code(err)
 
 
-def save_data():
+def _sqlite_save_data():
     try:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
@@ -93,7 +97,111 @@ def save_data():
         st.code(err)
 
 
-init_db()
+def _use_sqlite_adapter():
+    _sqlite_init_db()
+    return _sqlite_load_data, _sqlite_save_data
+
+
+# SQLAlchemy adapter will be created only when DATABASE_URL is set (production)
+def _use_sqlalchemy_adapter(database_url: str):
+    try:
+        sa = importlib.import_module("sqlalchemy")
+        from sqlalchemy import create_engine, Column, Integer, String, Float
+        from sqlalchemy.orm import declarative_base, sessionmaker
+    except Exception:
+        logging.exception("Failed to import SQLAlchemy; falling back to SQLite")
+        return None, None
+
+    engine_kwargs = {}
+    if database_url.startswith("sqlite"):
+        engine_kwargs["connect_args"] = {"check_same_thread": False}
+
+    engine = create_engine(database_url, **engine_kwargs)
+    SessionLocal = sessionmaker(bind=engine)
+    Base = declarative_base()
+
+
+    class Transaction(Base):
+        __tablename__ = "transactions"
+        id = Column(Integer, primary_key=True)
+        Date = Column(String)
+        Type = Column(String)
+        Category = Column(String)
+        Amount = Column(Float)
+        Description = Column(String)
+
+
+    class Budget(Base):
+        __tablename__ = "budgets"
+        id = Column(Integer, primary_key=True)
+        Category = Column(String, unique=True)
+        Amount = Column(Float)
+
+
+    def _sa_init_db():
+        try:
+            Base.metadata.create_all(bind=engine)
+        except Exception:
+            logging.exception("Failed to initialize SQLAlchemy database")
+
+
+    def _sa_load_data():
+        try:
+            session = SessionLocal()
+            txs = session.query(Transaction).all()
+            if txs:
+                st.session_state.transactions = pd.DataFrame([
+                    {
+                        "Date": t.Date,
+                        "Type": t.Type,
+                        "Category": t.Category,
+                        "Amount": t.Amount,
+                        "Description": t.Description,
+                    }
+                    for t in txs
+                ])
+
+            bgs = session.query(Budget).all()
+            if bgs:
+                st.session_state.budgets = {b.Category: b.Amount for b in bgs}
+            session.close()
+        except Exception:
+            err = traceback.format_exc()
+            logging.exception("Error loading data from SQL database")
+            st.warning("Could not load data from SQL database. Using session storage only.")
+            st.code(err)
+
+
+    def _sa_save_data():
+        try:
+            session = SessionLocal()
+            session.query(Transaction).delete()
+            if not st.session_state.transactions.empty:
+                for _, row in st.session_state.transactions.iterrows():
+                    t = Transaction(
+                        Date=str(row.get("Date", "")),
+                        Type=row.get("Type", ""),
+                        Category=row.get("Category", ""),
+                        Amount=float(row.get("Amount", 0)),
+                        Description=row.get("Description", ""),
+                    )
+                    session.add(t)
+
+            session.query(Budget).delete()
+            for cat, amt in st.session_state.budgets.items():
+                b = Budget(Category=cat, Amount=float(amt))
+                session.add(b)
+
+            session.commit()
+            session.close()
+        except Exception:
+            err = traceback.format_exc()
+            logging.exception("Error saving data to SQL database")
+            st.warning("Could not save data to SQL database.")
+            st.code(err)
+
+    _sa_init_db()
+    return _sa_load_data, _sa_save_data
 
 # Initialize session state
 if 'transactions' not in st.session_state:
@@ -103,6 +211,14 @@ if 'budgets' not in st.session_state:
     st.session_state.budgets = {}
 
 if 'data_loaded' not in st.session_state:
+    # Choose adapter based on DATABASE_URL
+    if DATABASE_URL:
+        load_data, save_data = _use_sqlalchemy_adapter(DATABASE_URL)
+        if load_data is None:
+            # SQLAlchemy import/initialization failed; fall back to sqlite
+            load_data, save_data = _use_sqlite_adapter()
+    else:
+        load_data, save_data = _use_sqlite_adapter()
     load_data()
     st.session_state.data_loaded = True
 
