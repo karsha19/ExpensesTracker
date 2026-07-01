@@ -2,7 +2,11 @@ services:
   - type: web
     name: fintrack-expense-tracker
     env: python
-    runtime: python
+    runtime: python-3.13
     plan: free
-    buildCommand: python -m pip install --upgrade pip setuptools wheel && python -m pip install -r requirements.txt
+    # Use production requirements (includes psycopg2-binary for Postgres on Render)
+    buildCommand: python -m pip install --upgrade pip setuptools wheel && python -m pip install -r requirements-prod.txt
     startCommand: python -m streamlit run app.py --server.port $PORT --server.address 0.0.0.0
+    # Set DATABASE_URL in the Render dashboard (Environment > Environment Variables)
+    # e.g.: postgresql://USER:PASSWORD@HOST:5432/DATABASE
+    # If DATABASE_URL is not set, the app will use the local SQLite file `fintrack.db`.
