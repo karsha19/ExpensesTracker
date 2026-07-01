@@ -3,102 +3,97 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime, date
-import json
-from io import StringIO, BytesIO
-import base64
-from pymongo import MongoClient
+import sqlite3
+from pathlib import Path
+import logging
+import traceback
+from datetime import date
 
-# Page configuration
-st.set_page_config(
-    page_title="💰 FinTrack - Personal Expense Tracker",
-    page_icon="💰",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# Custom CSS for modern, appealing UI
-st.markdown("""
-<style>
-    .main {
-        padding: 2rem;
-    }
-    .stApp {
-        background: linear-gradient(135deg, #0f0f23 0%, #1a1a2e 100%);
-    }
-    .metric-card {
-        background: rgba(255,255,255,0.1);
-        border-radius: 15px;
-        padding: 1.5rem;
-        border: 1px solid rgba(255,255,255,0.2);
-        box-shadow: 0 4px 15px rgba(0,0,0,0.3);
-    }
-    .sidebar .sidebar-content {
-        background: rgba(15,15,35,0.95);
-    }
-    h1, h2, h3 {
-        color: #00ff9d;
-    }
-    .stButton>button {
-        background: linear-gradient(45deg, #00ff9d, #00cc7a);
-        color: black;
-        border-radius: 10px;
-        font-weight: bold;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017/").strip()
-MONGODB_DB = os.getenv("MONGODB_DB", "fintrack").strip()
+# SQLite default DB file (can override with DATABASE_FILE env var)
+DB_FILE = os.getenv("DATABASE_FILE", "fintrack.db")
+DB_PATH = Path(DB_FILE)
 
 
-def get_database():
-    if not MONGODB_URI:
-        return None
+def init_db():
     try:
-        client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
-        client.admin.command("ping")
-        return client[MONGODB_DB]
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                Date TEXT,
+                Type TEXT,
+                Category TEXT,
+                Amount REAL,
+                Description TEXT
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS budgets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                Category TEXT UNIQUE,
+                Amount REAL
+            )
+            """
+        )
+        conn.commit()
+        conn.close()
     except Exception:
-        st.warning("MongoDB connection failed. Data will persist only for this session.")
-        return None
-
-
-db = get_database()
+        logging.exception("Failed to initialize the database")
 
 
 def load_data():
-    if db is None:
-        return
     try:
-        transactions = list(db.transactions.find({}, {"_id": 0}))
-        if transactions:
-            st.session_state.transactions = pd.DataFrame(transactions)
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT Date, Type, Category, Amount, Description FROM transactions")
+        rows = cur.fetchall()
+        if rows:
+            st.session_state.transactions = pd.DataFrame(rows, columns=["Date", "Type", "Category", "Amount", "Description"])
 
-        budgets_doc = db.budgets.find_one({"_id": "budgets"})
-        if budgets_doc and isinstance(budgets_doc.get("data"), dict):
-            st.session_state.budgets = budgets_doc["data"]
+        cur.execute("SELECT Category, Amount FROM budgets")
+        rows = cur.fetchall()
+        if rows:
+            st.session_state.budgets = {r[0]: r[1] for r in rows}
+
+        conn.close()
     except Exception:
-        st.warning("Could not load data from MongoDB. Using session storage only.")
+        err = traceback.format_exc()
+        logging.exception("Error loading data from SQLite")
+        st.warning("Could not load data from the database. Using session storage only.")
+        st.code(err)
 
 
 def save_data():
-    if db is None:
-        return
     try:
-        db.transactions.delete_many({})
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("DELETE FROM transactions")
         if not st.session_state.transactions.empty:
-            records = st.session_state.transactions.copy()
-            records["Date"] = records["Date"].astype(str)
-            db.transactions.insert_many(records.to_dict("records"))
+            for _, row in st.session_state.transactions.iterrows():
+                cur.execute(
+                    "INSERT INTO transactions (Date, Type, Category, Amount, Description) VALUES (?, ?, ?, ?, ?)",
+                    (str(row.get("Date", "")), row.get("Type", ""), row.get("Category", ""), float(row.get("Amount", 0)), row.get("Description", "")),
+                )
 
-        db.budgets.replace_one(
-            {"_id": "budgets"},
-            {"_id": "budgets", "data": st.session_state.budgets},
-            upsert=True,
-        )
+        cur.execute("DELETE FROM budgets")
+        for cat, amt in st.session_state.budgets.items():
+            cur.execute("INSERT OR REPLACE INTO budgets (Category, Amount) VALUES (?, ?)", (cat, float(amt)))
+
+        conn.commit()
+        conn.close()
     except Exception:
-        st.warning("Could not save data to MongoDB.")
+        err = traceback.format_exc()
+        logging.exception("Error saving data to SQLite")
+        st.warning("Could not save data to the database.")
+        st.code(err)
+
+
+init_db()
 
 # Initialize session state
 if 'transactions' not in st.session_state:
@@ -124,9 +119,6 @@ page = st.sidebar.radio("Navigate",
     ["Dashboard", "Add Transaction", "Transactions", "Budgets", "Reports", "Settings"])
 
 # Helper functions
-def save_data():
-    # For persistence in this demo - in production use database or file
-    pass
 
 def calculate_balance(df):
     if df.empty:
