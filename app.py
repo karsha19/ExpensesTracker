@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -6,6 +7,7 @@ from datetime import datetime, date
 import json
 from io import StringIO, BytesIO
 import base64
+from pymongo import MongoClient
 
 # Page configuration
 st.set_page_config(
@@ -46,12 +48,68 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+MONGODB_URI = os.getenv("MONGODB_URI", "").strip()
+MONGODB_DB = os.getenv("MONGODB_DB", "fintrack").strip()
+
+
+def get_database():
+    if not MONGODB_URI:
+        return None
+    try:
+        client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
+        client.admin.command("ping")
+        return client[MONGODB_DB]
+    except Exception:
+        st.warning("MongoDB connection failed. Data will persist only for this session.")
+        return None
+
+
+db = get_database()
+
+
+def load_data():
+    if db is None:
+        return
+    try:
+        transactions = list(db.transactions.find({}, {"_id": 0}))
+        if transactions:
+            st.session_state.transactions = pd.DataFrame(transactions)
+
+        budgets_doc = db.budgets.find_one({"_id": "budgets"})
+        if budgets_doc and isinstance(budgets_doc.get("data"), dict):
+            st.session_state.budgets = budgets_doc["data"]
+    except Exception:
+        st.warning("Could not load data from MongoDB. Using session storage only.")
+
+
+def save_data():
+    if db is None:
+        return
+    try:
+        db.transactions.delete_many({})
+        if not st.session_state.transactions.empty:
+            records = st.session_state.transactions.copy()
+            records["Date"] = records["Date"].astype(str)
+            db.transactions.insert_many(records.to_dict("records"))
+
+        db.budgets.replace_one(
+            {"_id": "budgets"},
+            {"_id": "budgets", "data": st.session_state.budgets},
+            upsert=True,
+        )
+    except Exception:
+        st.warning("Could not save data to MongoDB.")
+
 # Initialize session state
 if 'transactions' not in st.session_state:
     st.session_state.transactions = pd.DataFrame(columns=['Date', 'Type', 'Category', 'Amount', 'Description'])
 
 if 'budgets' not in st.session_state:
     st.session_state.budgets = {}
+
+if 'data_loaded' not in st.session_state:
+    load_data()
+    st.session_state.data_loaded = True
 
 # Categories
 EXPENSE_CATEGORIES = ["Food & Dining", "Transport", "Shopping", "Bills & Utilities", "Entertainment", 
@@ -334,6 +392,9 @@ elif page == "Settings":
         if st.checkbox("I understand this is irreversible"):
             st.session_state.transactions = pd.DataFrame(columns=['Date', 'Type', 'Category', 'Amount', 'Description'])
             st.session_state.budgets = {}
+            if db is not None:
+                db.transactions.delete_many({})
+                db.budgets.delete_many({})
             st.success("All data cleared!")
     
     st.subheader("Theme & Preferences")
