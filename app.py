@@ -48,7 +48,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-MONGODB_URI = os.getenv("MONGODB_URI", "").strip()
+MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017/").strip()
 MONGODB_DB = os.getenv("MONGODB_DB", "fintrack").strip()
 
 
