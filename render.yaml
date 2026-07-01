@@ -2,7 +2,7 @@ services:
   - type: web
     name: fintrack-expense-tracker
     env: python
-    runtime: python-3.11
+    runtime: python-3.13
     plan: free
     buildCommand: pip install --upgrade pip setuptools wheel && pip install -r requirements.txt
-    startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0
+    startCommand: python -m streamlit run app.py --server.port $PORT --server.address 0.0.0.0
